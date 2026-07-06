@@ -60,22 +60,40 @@ flowchart TD
   type into.
 - ~30GB free disk for model weights + images, out of your 750GB
 
+## Quickstart
+
+Once prerequisites are installed (see below) and the cluster has been created
+at least once, day-to-day use is just:
+
+```bash
+bash start-rill.sh   # brings up cluster (if needed), vLLM, port-forward, monitoring
+bash stop-rill.sh    # scales everything down, frees the GPU, stops monitoring
+```
+
+Both are idempotent — safe to run repeatedly. Neither deletes the kind
+cluster or the downloaded model weights, so `start-rill.sh` after a
+`stop-rill.sh` is fast (no re-download, no re-pull of the vLLM image).
+
 ## Project layout
 
 ```
 genai-k8s-lab/
 ├── README.md
+├── start-rill.sh                 # bring up the whole stack (idempotent)
+├── stop-rill.sh                  # tear it back down, keep cluster/weights (idempotent)
 ├── kind-config.yaml
 ├── setup/
 │   ├── 01-install-prereqs.sh     # docker CLI, nvidia-container-toolkit, kind, kubectl, helm
 │   ├── 02-create-cluster.sh      # kind cluster + nvidia device plugin
-│   └── 03-install-kserve.sh      # KServe quickstart (Knative-less, RawDeployment mode)
+│   ├── 03-install-kserve.sh      # KServe quickstart (Knative-less, RawDeployment mode)
+│   └── 04-install-dashboard.sh   # Kubernetes Dashboard web UI + admin token
 ├── manifests/
 │   ├── vllm-deployment.yaml      # vLLM OpenAI-compatible server
 │   ├── tgi-deployment.yaml       # HF TGI server, same model, for comparison
 │   ├── kserve-inferenceservice.yaml
 │   ├── pvc-model-cache.yaml      # PVC + init-container HF Hub download pattern
-│   └── oci-volume-model.yaml     # OCI artifact volume mount pattern
+│   ├── oci-volume-model.yaml     # OCI artifact volume mount pattern
+│   └── dashboard-admin.yaml      # admin ServiceAccount for Kubernetes Dashboard
 ├── scripts/
 │   ├── test-inference.sh         # port-forward + curl + jq chat completion
 │   └── load-test.sh              # concurrent request load test
@@ -83,6 +101,81 @@ genai-k8s-lab/
     ├── docker-compose.yaml       # Prometheus + Grafana (simplest path)
     ├── prometheus.yml
     └── grafana-dashboard-vllm.json
+```
+
+## Kubernetes operations reference
+
+`start-rill.sh`/`stop-rill.sh` cover the common path. These are the raw
+`kubectl`/`kind`/`helm` commands underneath, useful when you need finer
+control than the scripts give you.
+
+### Cluster / context
+
+```bash
+kind get clusters                              # list kind clusters on this machine
+kubectl config get-contexts                    # confirm which context is active
+kubectl config use-context kind-genai-lab      # switch to this lab's cluster
+kubectl cluster-info                           # API server / CoreDNS endpoints
+kubectl get nodes -o wide                      # node status, k8s version, IP
+```
+
+### Namespace and resource overview
+
+```bash
+kubectl get all -n genai                       # everything in the app namespace at a glance
+kubectl get pods -n genai -o wide              # pods with node/IP
+kubectl get pvc,pv -n genai                    # storage
+kubectl get events -n genai --sort-by=.lastTimestamp   # recent cluster events, oldest last
+```
+
+### Deploying / redeploying individual pieces
+
+```bash
+kubectl apply -f manifests/pvc-model-cache.yaml
+kubectl apply -f manifests/vllm-deployment.yaml
+kubectl -n genai rollout restart deployment/vllm     # force a fresh pod without changing the manifest
+kubectl -n genai rollout status deployment/vllm --timeout=600s
+kubectl -n genai rollout undo deployment/vllm        # roll back to the previous ReplicaSet
+```
+
+### Scaling (this lab's one-GPU rule: only one of vllm/tgi/kserve-predictor at a time)
+
+```bash
+kubectl -n genai scale deployment/vllm --replicas=0   # free the GPU
+kubectl -n genai scale deployment/vllm --replicas=1   # bring it back
+kubectl -n genai get deployment                       # confirm desired vs available replicas
+```
+
+### Inspecting a specific pod
+
+```bash
+kubectl -n genai describe pod <pod-name>              # events, resource requests, conditions
+kubectl -n genai logs <pod-name>                      # current container logs
+kubectl -n genai logs <pod-name> --previous            # logs from the last crashed instance
+kubectl -n genai logs -f <pod-name>                    # follow/tail live
+kubectl -n genai exec -it <pod-name> -- bash            # shell into the container
+kubectl -n genai top pod <pod-name>                    # live CPU/memory (needs metrics-server, not installed by default in kind)
+```
+
+### Cleanup levels (least to most destructive)
+
+```bash
+bash stop-rill.sh                                       # scale workloads to 0, stop monitoring — keeps cluster + weights
+kubectl -n genai delete job model-download              # force a re-download next time (rare — only if weights are corrupt)
+kind delete cluster --name genai-lab                    # full cluster teardown — loses the PVC/model weights too
+```
+
+After a full `kind delete cluster`, `bash start-rill.sh` rebuilds everything
+from scratch (custom node image, RuntimeClass, device plugin, re-download of
+weights) — expect the full first-run time described in "Known slow/first-run
+steps" below, not the fast path.
+
+### Helm (used for the NVIDIA device plugin)
+
+```bash
+helm -n kube-system list                                # confirm nvidia-device-plugin release
+helm -n kube-system get values nvidia-device-plugin      # what values it's actually running with
+helm -n kube-system uninstall nvidia-device-plugin       # remove it (breaks GPU scheduling until reinstalled)
 ```
 
 ## How GPU passthrough actually works here (read this before debugging)
@@ -200,33 +293,38 @@ manifest.
 ```bash
 cd genai-k8s-lab
 
-# 1. Install prerequisites inside WSL2 Ubuntu
+# 1. Install prerequisites inside WSL2 Ubuntu (one-time)
 bash setup/01-install-prereqs.sh
 
-# 2. Create kind cluster with GPU passthrough + install NVIDIA device plugin
-bash setup/02-create-cluster.sh
+# 2. Bring up the whole stack: cluster, GPU passthrough, vLLM, port-forward,
+#    monitoring. Safe to re-run any time — see Quickstart above.
+bash start-rill.sh
 
-# 3. Deploy vLLM
-kubectl apply -f manifests/pvc-model-cache.yaml
-kubectl apply -f manifests/vllm-deployment.yaml
-kubectl -n genai rollout status deployment/vllm
-
-# 4. Test it
+# 3. Test it
 bash scripts/test-inference.sh
 
-# 5. (optional) Load test / continuous batching demo
+# 4. (optional) Load test / continuous batching demo
 bash scripts/load-test.sh
 
-# 6. (optional) Deploy TGI side-by-side for comparison
+# 5. (optional) Deploy TGI side-by-side for comparison — see README
+#    troubleshooting #16-18 first: known unresolved GPU-arch limitation.
+#    Scale vLLM to 0 first (one GPU): kubectl -n genai scale deployment/vllm --replicas=0
 kubectl apply -f manifests/tgi-deployment.yaml
 
-# 7. (optional) Install KServe and deploy the InferenceService wrapper
+# 6. (optional) Install KServe and deploy the InferenceService wrapper
 bash setup/03-install-kserve.sh
 kubectl apply -f manifests/kserve-inferenceservice.yaml
 
-# 8. (optional) Monitoring stack
-cd monitoring && docker-compose up -d
+# 7. (optional) Kubernetes Dashboard web UI
+bash setup/04-install-dashboard.sh
+
+# When done for the day:
+bash stop-rill.sh
 ```
+
+`start-rill.sh`/`stop-rill.sh` cover the core vLLM + monitoring path only —
+TGI, KServe, and the Dashboard are opt-in extras layered on top (steps 5-7
+above), since this laptop has exactly one GPU and vLLM is the primary demo.
 
 See bottom of this file for the exact copy-pasteable command list.
 
@@ -248,14 +346,10 @@ See bottom of this file for the exact copy-pasteable command list.
 
 ```bash
 cd genai-k8s-lab
-chmod +x setup/*.sh scripts/*.sh
+chmod +x setup/*.sh scripts/*.sh start-rill.sh stop-rill.sh
 
 bash setup/01-install-prereqs.sh
-bash setup/02-create-cluster.sh
-
-kubectl apply -f manifests/pvc-model-cache.yaml
-kubectl apply -f manifests/vllm-deployment.yaml
-kubectl -n genai rollout status deployment/vllm --timeout=600s
+bash start-rill.sh
 
 bash scripts/test-inference.sh
 ```
