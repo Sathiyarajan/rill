@@ -1,0 +1,118 @@
+{
+  "title": "vLLM Lab Dashboard",
+  "uid": "vllm-lab",
+  "timezone": "browser",
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Tokens/sec (prompt vs generation throughput)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "rate(vllm:generation_tokens_total[1m])", "legendFormat": "generation tok/s" },
+        { "expr": "rate(vllm:prompt_tokens_total[1m])", "legendFormat": "prompt tok/s" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Time to First Token (p50/p95/p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(vllm:time_to_first_token_seconds_bucket[1m]))", "legendFormat": "TTFT p50" },
+        { "expr": "histogram_quantile(0.95, rate(vllm:time_to_first_token_seconds_bucket[1m]))", "legendFormat": "TTFT p95" },
+        { "expr": "histogram_quantile(0.99, rate(vllm:time_to_first_token_seconds_bucket[1m]))", "legendFormat": "TTFT p99" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Running / Waiting Requests (continuous batching)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "vllm:num_requests_running", "legendFormat": "running" },
+        { "expr": "vllm:num_requests_waiting", "legendFormat": "waiting" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "KV Cache Usage %",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "vllm:kv_cache_usage_perc * 100", "legendFormat": "KV cache %" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Inter-Token Latency / Time Per Output Token (p50/p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(vllm:inter_token_latency_seconds_bucket[1m]))", "legendFormat": "ITL p50" },
+        { "expr": "histogram_quantile(0.95, rate(vllm:inter_token_latency_seconds_bucket[1m]))", "legendFormat": "ITL p95" },
+        { "expr": "histogram_quantile(0.50, rate(vllm:request_time_per_output_token_seconds_bucket[1m]))", "legendFormat": "TPOT p50" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "End-to-End Request Latency (p50/p95/p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(vllm:e2e_request_latency_seconds_bucket[1m]))", "legendFormat": "e2e p50" },
+        { "expr": "histogram_quantile(0.95, rate(vllm:e2e_request_latency_seconds_bucket[1m]))", "legendFormat": "e2e p95" },
+        { "expr": "histogram_quantile(0.99, rate(vllm:e2e_request_latency_seconds_bucket[1m]))", "legendFormat": "e2e p99" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Request Time Breakdown: Queue vs Prefill vs Decode (p50)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(vllm:request_queue_time_seconds_bucket[1m]))", "legendFormat": "queue time p50" },
+        { "expr": "histogram_quantile(0.50, rate(vllm:request_prefill_time_seconds_bucket[1m]))", "legendFormat": "prefill time p50" },
+        { "expr": "histogram_quantile(0.50, rate(vllm:request_decode_time_seconds_bucket[1m]))", "legendFormat": "decode time p50" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Prefix Cache Hit Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "expr": "rate(vllm:prefix_cache_hits_total[1m]) / clamp_min(rate(vllm:prefix_cache_queries_total[1m]), 1)",
+          "legendFormat": "hit rate"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Request Outcomes (success/preemption rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "targets": [
+        { "expr": "rate(vllm:request_success_total[1m])", "legendFormat": "success/s ({{finished_reason}})" },
+        { "expr": "rate(vllm:num_preemptions_total[1m])", "legendFormat": "preemptions/s" }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Prompt / Generation Token Count per Request (p50/p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(vllm:request_prompt_tokens_bucket[1m]))", "legendFormat": "prompt tokens p50" },
+        { "expr": "histogram_quantile(0.95, rate(vllm:request_prompt_tokens_bucket[1m]))", "legendFormat": "prompt tokens p95" },
+        { "expr": "histogram_quantile(0.50, rate(vllm:request_generation_tokens_bucket[1m]))", "legendFormat": "generation tokens p50" },
+        { "expr": "histogram_quantile(0.95, rate(vllm:request_generation_tokens_bucket[1m]))", "legendFormat": "generation tokens p95" }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 2
+}

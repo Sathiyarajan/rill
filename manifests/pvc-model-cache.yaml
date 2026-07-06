@@ -1,0 +1,66 @@
+# Pattern 1 for getting model weights onto a pod: a PVC populated once by an
+# init container that pulls from the Hugging Face Hub, then reused by any pod
+# that mounts the same PVC (avoids re-downloading weights on every pod restart).
+#
+# PRODUCTION DIFFERENCE: production clusters usually back this with a real
+# network-attached volume (EBS/PD/Azure Disk via CSI, or a shared filesystem
+# like NFS/Lustre/JuiceFS for multi-node ReadWriteMany access so many replicas
+# share one copy). kind's default StorageClass ("standard") is `local-path-provisioner`
+# — node-local, ReadWriteOnce only, and lost if the kind node is deleted. Fine
+# for this single-node lab, not for a real multi-node fleet.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+  namespace: genai
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 20Gi   # fits Qwen2.5-3B fp16 (~6GB) or -AWQ 4-bit (~2GB) plus headroom
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+  namespace: genai
+spec:
+  # idempotent: if weights already present, init logic below is a no-op
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: download
+          image: python:3.11-slim
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              MODEL="${MODEL_ID:-Qwen/Qwen2.5-3B-Instruct}"
+              DEST="/models/$(echo "$MODEL" | tr '/' '_')"
+              if [ -f "$DEST/.download_complete" ]; then
+                echo "Model already cached at $DEST, skipping download"
+                exit 0
+              fi
+              pip install --no-cache-dir "huggingface_hub[cli]" >/dev/null
+              mkdir -p "$DEST"
+              hf download "$MODEL" --local-dir "$DEST"
+              touch "$DEST/.download_complete"
+              echo "Download complete: $DEST"
+          env:
+            - name: MODEL_ID
+              value: "Qwen/Qwen2.5-3B-Instruct"
+            # If you need the 4-bit fallback for VRAM headroom, override to:
+            # Qwen/Qwen2.5-3B-Instruct-AWQ
+            - name: HF_HOME
+              value: /models/.cache
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache

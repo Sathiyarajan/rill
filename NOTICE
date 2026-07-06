@@ -1,0 +1,14 @@
+Rill — GenAI on Kubernetes Local Practice Lab
+Copyright 2026 Rill (GenAI on Kubernetes Practice Lab) Contributors
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+Project status: Incubating.
+
+This is an independent open-source project and is not affiliated with,
+endorsed by, or submitted to the Apache Software Foundation. "Incubating"
+here describes the project's own maturity level (APIs, manifests, and
+scripts may change without notice, and some paths — see the TGI limitation
+in README.md troubleshooting #18 — are known-incomplete) — it does not imply
+ASF Incubator status.

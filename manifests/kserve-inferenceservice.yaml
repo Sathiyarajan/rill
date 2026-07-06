@@ -1,0 +1,76 @@
+# KServe InferenceService wrapping the same model, using vLLM as the backing
+# runtime, to practice the KServe abstraction (predictor spec, scale-to-zero
+# semantics, canary rollout fields) even though this lab runs it in RawDeployment
+# mode (see setup/03-install-kserve.sh) rather than full Knative-serverless mode.
+#
+# GPU CONSTRAINT: one GPU. Do not run this alongside manifests/vllm-deployment.yaml
+# and manifests/tgi-deployment.yaml simultaneously — scale those to 0 first.
+#
+# PRODUCTION DIFFERENCES this lab skips:
+#   - Real KServe deployments usually run in Serverless mode (Knative-backed),
+#     giving true scale-to-zero and request-driven autoscaling. RawDeployment
+#     mode here just produces a plain Deployment/Service/HPA, no Knative.
+#   - No multi-model serving / model mesh (packing many small models per GPU).
+#   - No canary traffic splitting between predictor revisions (a core KServe
+#     feature at scale) — this lab has only one revision.
+#   - No inference autoscaling based on GPU queue depth/utilization.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: qwen-vllm
+  namespace: genai
+  annotations:
+    # RawDeployment mode: plain Deployment/Service instead of Knative Service.
+    serving.kserve.io/deploymentMode: "RawDeployment"
+spec:
+  predictor:
+    minReplicas: 1
+    maxReplicas: 1   # single GPU -> hard cap at 1
+    runtimeClassName: nvidia
+    containers:
+      - name: kserve-container
+        # Pinned v0.6.3 fails on GPUs newer than what it was built against — see
+        # README troubleshooting #11. Use :latest, same as manifests/vllm-deployment.yaml.
+        image: vllm/vllm-openai:latest
+        args:
+          - "--model=Qwen/Qwen2.5-3B-Instruct"
+          - "--dtype=float16"
+          # Settings below match manifests/vllm-deployment.yaml's hard-won values —
+          # see README troubleshooting #13-15 for why these exact numbers (WSL2's
+          # GPU memory accounting quirk leaves a narrow working window on 8GB VRAM).
+          - "--max-model-len=2048"
+          - "--gpu-memory-utilization=0.85"
+          - "--enforce-eager"
+          - "--tensor-parallel-size=1"
+          - "--port=8000"
+        ports:
+          - containerPort: 8000
+            protocol: TCP
+        env:
+          - name: HF_HOME
+            value: "/models/.cache"
+          # Same Service-name/env-var collision as vLLM's Deployment — see README
+          # troubleshooting #10. KServe creates a Service named after this
+          # InferenceService, which auto-injects a colliding VLLM_PORT env var.
+          - name: VLLM_PORT
+            value: "8000"
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+            memory: "12Gi"
+            # KServe's defaulting webhook injects cpu limit=1 if unset, which then
+            # conflicts with the cpu request below ("must be less than or equal to
+            # cpu limit"). Set explicitly to avoid that — plain Deployments (vLLM,
+            # TGI) don't go through this webhook so didn't need this.
+            cpu: "2"
+          requests:
+            nvidia.com/gpu: "1"
+            cpu: "2"
+            memory: "6Gi"
+        volumeMounts:
+          - name: model-cache
+            mountPath: /models
+    volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache
