@@ -1,0 +1,63 @@
+# Pattern 2 for getting model weights onto a pod: an OCI artifact volume mount,
+# where model weights are packaged as an OCI image (via `oras push` or similar)
+# and mounted read-only into the pod at startup — no init container, no PVC,
+# no re-download logic. This is the newer, image-native alternative to the
+# PVC + init-container pattern in pvc-model-cache.yaml.
+#
+# REQUIRES: Kubernetes 1.31+ with the `ImageVolume` feature gate enabled (it is
+# alpha in 1.31, beta in 1.33+). kind images (`kindest/node`) built from those
+# k8s versions support this if the feature gate is turned on in kind-config.yaml
+# via kubeadmConfigPatches: featureGates: {ImageVolume: true}. Check your kind
+# node's k8s version before relying on this manifest — if unsupported, use
+# pvc-model-cache.yaml instead.
+#
+# To produce the OCI artifact referenced below, package model weights as a plain
+# OCI image (files under a single layer, no entrypoint needed) with a tool like
+# `oras push` or `docker buildx build --output type=oci`, then push to any OCI
+# registry (ghcr.io, Docker Hub, a local registry, etc). Example:
+#   oras push localhost:5000/models/qwen2.5-3b-awq:v1 ./qwen2.5-3b-awq-weights/
+#
+# PRODUCTION DIFFERENCE: at scale, OCI-packaged model volumes let you use normal
+# image registries, pull-through caches, and image layer dedup/caching across
+# nodes — avoiding a shared-filesystem dependency. Production setups would also
+# sign/verify these artifacts (cosign) and pull through a private registry mirror
+# close to the GPU nodes. This lab just points at a public/local registry directly.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-oci-volume-demo
+  namespace: genai
+  labels:
+    app: vllm-oci-demo
+spec:
+  runtimeClassName: nvidia
+  containers:
+    - name: vllm
+      image: vllm/vllm-openai:v0.6.3
+      args:
+        - "--model=/mnt/model"
+        - "--dtype=float16"
+        - "--max-model-len=4096"
+        - "--gpu-memory-utilization=0.85"
+        - "--tensor-parallel-size=1"
+        - "--port=8000"
+      ports:
+        - containerPort: 8000
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+          memory: "12Gi"
+        requests:
+          nvidia.com/gpu: 1
+          cpu: "2"
+          memory: "6Gi"
+      volumeMounts:
+        - name: model-oci
+          mountPath: /mnt/model
+          readOnly: true
+  volumes:
+    - name: model-oci
+      image:
+        # Replace with your pushed OCI artifact reference.
+        reference: localhost:5000/models/qwen2.5-3b-awq:v1
+        pullPolicy: IfNotPresent

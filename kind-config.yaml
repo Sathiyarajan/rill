@@ -1,0 +1,53 @@
+# Single-node kind cluster with GPU passthrough.
+#
+# kind itself has no native GPU concept — passthrough works because the kind node
+# is just a docker container. Docker Desktop's nvidia runtime only auto-injects the
+# GPU when default-runtime=nvidia AND the container sets NVIDIA_VISIBLE_DEVICES
+# itself, so setup/02-create-cluster.sh builds a custom node image (see `image:`
+# below) with that env var baked in, rather than relying on --gpus (which kind's
+# node-creation path doesn't expose) or default-runtime alone.
+#
+# PRODUCTION DIFFERENCE: real clusters run kubelet directly on bare-metal/VM GPU
+# nodes (no nested-container GPU passthrough hack), typically across many GPU
+# nodes in a node pool, with node labels/taints (e.g. nvidia.com/gpu=present:NoSchedule)
+# and a cluster autoscaler reacting to pending GPU pods. Here we have exactly one
+# node and exactly one GPU, so none of that pooling/autoscaling machinery applies.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: genai-lab
+nodes:
+  - role: control-plane
+    # Custom node image with NVIDIA_VISIBLE_DEVICES/NVIDIA_DRIVER_CAPABILITIES baked
+    # in via ENV (see setup/02-create-cluster.sh, which builds this from a Dockerfile
+    # FROM kindest/node:v1.30.0). Required because Docker Desktop's nvidia runtime only
+    # auto-injects the GPU when the container image sets these env vars itself (or the
+    # docker CLI passes --gpus, which kind's node-creation path doesn't support) —
+    # setting default-runtime: nvidia alone in Docker Desktop is not sufficient.
+    image: kindest/node:v1.30.0-gpu
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "gpu=rtx5060,tier=single-node-lab"
+featureGates: {}
+# The node container getting GPU access from Docker Desktop is not enough — pods
+# are actually launched by containerd running *inside* the node, which knows
+# nothing about the nvidia runtime unless we tell it. This registers "nvidia" as
+# an ADDITIONAL containerd runtime (using nvidia-container-runtime, installed
+# inside the custom node image by setup/02-create-cluster.sh) alongside the
+# default runc — it does NOT replace the default, so system pods (etcd,
+# apiserver, etc) keep running on plain runc. Only pods that explicitly set
+# `runtimeClassName: nvidia` (see the matching RuntimeClass object applied by
+# setup/02-create-cluster.sh, and the GPU-requesting manifests under manifests/)
+# get routed through the nvidia runtime. Overriding the node-wide default runtime
+# instead was tried and breaks etcd/kube-apiserver — do not do that.
+containerdConfigPatches:
+  - |
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]
+      privileged_without_host_devices = false
+      runtime_engine = ""
+      runtime_root = ""
+      runtime_type = "io.containerd.runc.v2"
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]
+      BinaryName = "/usr/bin/nvidia-container-runtime"

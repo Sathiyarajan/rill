@@ -1,0 +1,131 @@
+# vLLM OpenAI-compatible server. Default model: Qwen2.5-3B-Instruct (fp16, ~6GB
+# weights) — fits comfortably in 8GB VRAM with room for KV cache at modest
+# context/batch size. If you OOM, switch MODEL_ID below to the AWQ 4-bit variant
+# (Qwen/Qwen2.5-3B-Instruct-AWQ, ~2GB weights) and add `--quantization awq` to args.
+#
+# GPU CONSTRAINT: exactly one GPU on this laptop, so requests/limits on
+# nvidia.com/gpu are fixed at 1 everywhere in this repo — never higher.
+#
+# PRODUCTION DIFFERENCES this lab skips:
+#   - No --tensor-parallel-size > 1 (would shard one model across multiple GPUs).
+#   - No --pipeline-parallel-size (multi-node pipeline parallelism).
+#   - No disaggregated prefill/decode (separate worker pools for compute-bound
+#     prefill vs memory-bound decode, common in large vLLM deployments).
+#   - No multi-replica HorizontalPodAutoscaler on GPU utilization/queue depth.
+#   - No PodDisruptionBudget / topology spread — single replica, single node.
+#   - No speculative decoding / prefix caching tuning for multi-tenant traffic.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: genai
+  labels:
+    app: vllm
+spec:
+  replicas: 1   # single GPU -> single replica, full stop
+  strategy:
+    type: Recreate   # can't rolling-update onto the same single GPU
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      runtimeClassName: nvidia
+      containers:
+        - name: vllm
+          # Pinned versions older than the GPU's release will fail at startup with
+          # "CUDA error: no kernel image is available for execution on the device"
+          # (the bundled torch/CUDA build has no compiled kernels for this GPU's
+          # compute capability). Use :latest so newly-released GPUs are covered;
+          # pin to a specific tag once you've confirmed it supports your GPU.
+          image: vllm/vllm-openai:latest
+          args:
+            - "--model=$(MODEL_ID)"
+            - "--dtype=float16"
+            - "--max-model-len=2048"     # keep KV cache small enough for 8GB VRAM
+            # WSL2 quirk observed: CUDA sees only ~6.87GiB free out of the card's
+            # 7.96GiB total at process startup, even though nvidia-smi shows 0MiB
+            # used — WSL2's paravirtualized GPU accounting reserves ~1.1GiB that
+            # never shows up against a specific process. gpu-memory-utilization is a
+            # fraction of the *total*, so anything above ~0.863 (6.87/7.96)
+            # overshoots what's actually available and vLLM refuses to start;
+            # anything too far below the ~6GB fp16 weight footprint leaves no room
+            # for KV cache blocks at all ("No available memory for the cache
+            # blocks"). 0.85 threads that narrow window on this card.
+            - "--gpu-memory-utilization=0.85"
+            # Skips CUDA graph capture (saves ~0.3-0.5GB VRAM overhead) — on an 8GB
+            # card, 6GB of fp16 weights leaves very little headroom, and CUDA graphs
+            # ate what was left of the KV cache budget (observed: only 0.02GiB free,
+            # need 0.14GiB minimum). Costs some per-token latency vs graphs, worth it
+            # here to actually fit. A card with more headroom wouldn't need this.
+            - "--enforce-eager"
+            - "--tensor-parallel-size=1" # single GPU only, see note above
+            - "--port=8000"
+          env:
+            - name: MODEL_ID
+              value: "Qwen/Qwen2.5-3B-Instruct"
+              # Fallback for tighter VRAM: "Qwen/Qwen2.5-3B-Instruct-AWQ"
+              # (then also add "--quantization=awq" to args above)
+            - name: HF_HOME
+              value: "/models/.cache"
+            # Kubernetes auto-injects a VLLM_PORT=tcp://<svc-ip>:8000 env var into
+            # every pod once the "vllm" Service exists (legacy Docker-links-style
+            # service discovery), which collides with vLLM's own VLLM_PORT env var
+            # and crashes it on startup ("invalid literal for int()"). Force it back
+            # to a plain port number to win over the auto-injected value.
+            - name: VLLM_PORT
+              value: "8000"
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              memory: "12Gi"
+            requests:
+              nvidia.com/gpu: 1
+              cpu: "2"
+              memory: "6Gi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30   # model load can take a while on first pull
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            # Cold start (weight load + torch.compile warmup) can take several
+            # minutes on first run; too-short initialDelaySeconds here kills the
+            # engine mid-startup and it never gets a chance to finish loading.
+            initialDelaySeconds: 240
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: genai
+  labels:
+    app: vllm
+spec:
+  selector:
+    app: vllm
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP

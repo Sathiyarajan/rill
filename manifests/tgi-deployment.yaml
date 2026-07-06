@@ -1,0 +1,122 @@
+# Hugging Face TGI server, same model as vllm-deployment.yaml, for side-by-side
+# comparison of throughput/latency/continuous-batching behavior between the two.
+#
+# GPU CONSTRAINT: one GPU total on this laptop. Do not run vLLM and TGI
+# simultaneously unless you scale one to 0 replicas first — both request
+# nvidia.com/gpu: 1 and only one GPU exists.
+#
+# KNOWN LIMITATION on this GPU (RTX 5060, sm_120): even with the fixes below,
+# TGI (as of the :latest tag at the time this was written) still fails with
+# "CUDA Error: no kernel image is available for execution on the device
+# /usr/src/flash-attention/csrc/layer_norm/ln_fwd_kernels.cuh" — a precompiled
+# flash-attention kernel with no sm_120 build, imported unconditionally by
+# mamba_ssm's fused layer-norm path while loading the Qwen2 model.
+# USE_FLASH_ATTENTION=0 does not avoid it (not gated by that flag). This isn't
+# fixable from this manifest — it needs a TGI image built with sm_120 in its
+# kernel target list. Left at replicas: 0. See README troubleshooting #17/#18
+# for the full debugging trail (worth keeping — the fixes below are still
+# correct and may be enough on an older/different GPU, or once HF ships a
+# newer image).
+#
+# PRODUCTION DIFFERENCES this lab skips:
+#   - No --sharded / multi-GPU tensor parallelism (TGI's equivalent to vLLM's TP).
+#   - No dedicated router/scheduler tier in front of many TGI replicas.
+#   - No speculative decoding config, no multi-LoRA adapter serving.
+#   - Single replica, no autoscaling, no PodDisruptionBudget.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tgi
+  namespace: genai
+  labels:
+    app: tgi
+spec:
+  replicas: 0   # start scaled to 0: only one GPU exists, scale vllm to 0 first if comparing
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tgi
+  template:
+    metadata:
+      labels:
+        app: tgi
+    spec:
+      runtimeClassName: nvidia
+      containers:
+        - name: tgi
+          # Pinned 2.3.1 fails on this GPU: "sm_120 is not compatible with the
+          # current PyTorch installation" — same class of issue as vLLM's pinned
+          # v0.6.3 (see README troubleshooting #11). Use :latest for new GPUs.
+          image: ghcr.io/huggingface/text-generation-inference:latest
+          args:
+            - "--model-id=$(MODEL_ID)"
+            - "--max-input-tokens=3072"
+            - "--max-total-tokens=4096"
+            - "--max-batch-prefill-tokens=4096"
+            - "--port=8080"
+            - "--disable-custom-kernels"
+          env:
+            - name: MODEL_ID
+              value: "Qwen/Qwen2.5-3B-Instruct"
+            - name: ATTENTION
+              value: "paged"
+            # Every attention backend (flashinfer AND paged) JIT-compiles a Triton
+            # kernel at startup that links against -lcuda. The image ships a proper
+            # unversioned libcuda.so at /usr/local/cuda-12.4/compat/libcuda.so, but
+            # Triton's own -L flags only point at /usr/lib/wsl/drivers/.../ (which
+            # only has versioned libcuda.so.1, no plain libcuda.so) — so -lcuda
+            # fails to resolve even though a usable library exists in the image.
+            # LIBRARY_PATH is additive to gcc's link search, so this makes gcc find
+            # the working one regardless of Triton's own -L flags.
+            - name: LIBRARY_PATH
+              value: "/usr/local/cuda-12.4/compat"
+            # Attempted fix for the KNOWN LIMITATION above — does NOT actually avoid
+            # the crash (the offending kernel isn't gated by this flag), left in
+            # place since it's harmless and may help on a future TGI release.
+            - name: USE_FLASH_ATTENTION
+              value: "0"
+              # AWQ fallback: "Qwen/Qwen2.5-3B-Instruct-AWQ" (add QUANTIZE=awq below)
+            - name: HUGGINGFACE_HUB_CACHE
+              value: "/models/.cache"
+          ports:
+            - containerPort: 8080
+              name: http
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              memory: "12Gi"
+            requests:
+              nvidia.com/gpu: 1
+              cpu: "2"
+              memory: "6Gi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tgi
+  namespace: genai
+  labels:
+    app: tgi
+spec:
+  selector:
+    app: tgi
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP

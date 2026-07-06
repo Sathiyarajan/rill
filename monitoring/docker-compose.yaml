@@ -1,0 +1,39 @@
+# Prometheus + Grafana, run as plain docker-compose (simplest path outside the
+# kind cluster) rather than deploying Prometheus Operator inside kind — the
+# operator is heavy for a single-node 8GB-VRAM lab. Prometheus reaches vLLM's
+# /metrics via `kubectl -n genai port-forward svc/vllm 8000:8000` run separately,
+# using host.docker.internal to reach the WSL2 host from inside these containers.
+#
+# PRODUCTION DIFFERENCE: production observability runs Prometheus Operator +
+# ServiceMonitors in-cluster, scraping every pod/node directly with real service
+# discovery, plus Alertmanager and long-term storage (Thanos/Mimir). Idempotent
+# to re-run: docker-compose up -d is a no-op if containers already exist.
+version: "3.8"
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: genai-lab-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: genai-lab-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./grafana-dashboard-vllm.json:/var/lib/grafana/dashboards/vllm.json:ro
+      - ./grafana-provisioning/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
+      - ./grafana-provisioning/datasource.yaml:/etc/grafana/provisioning/datasources/datasource.yaml:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped

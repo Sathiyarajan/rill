@@ -1,0 +1,14 @@
+# Scrapes vLLM's /metrics endpoint (Prometheus format, exposed on the same
+# port as the OpenAI API server, 8000) via the kubectl port-forward target below.
+#
+# PRODUCTION DIFFERENCE: real clusters run Prometheus in-cluster with
+# kubernetes_sd_configs service discovery across many pods/nodes, not a single
+# static target reached through a host port-forward from outside the cluster.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: vllm
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+    metrics_path: /metrics
